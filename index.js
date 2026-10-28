@@ -1,40 +1,68 @@
 require('dotenv').config();
 const fs = require('node:fs');
 const path = require('node:path');
-const { Client, Collection, Events, GatewayIntentBits } = require('discord.js');
+const { Client, Collection, Events, GatewayIntentBits, MessageFlags } = require('discord.js');
 
-// Create a new client instance
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
 client.commands = new Collection();
 
-const foldersPath = path.join(__dirname, 'commands');
-const commandFolders = fs.readdirSync(foldersPath);
-
-for (const folder of commandFolders) {
-	const commandsPath = path.join(foldersPath, folder);
-	const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
-	for (const file of commandFiles) {
-		const filePath = path.join(commandsPath, file);
-		const command = require(filePath);
-		// Set a new item in the Collection with the key as the command name and the value as the exported module
-		if ('data' in command && 'execute' in command) {
-			client.commands.set(command.data.name, command);
-		}
-    else {
-			console.log(`[WARNING] The command at ${filePath} is missing a required "data" or "execute" property.`);
-		}
-	}
+function findCommandFiles(directory) {
+  return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      return findCommandFiles(entryPath);
+    }
+    return entry.isFile() && entry.name.endsWith('.js') ? [entryPath] : [];
+  });
 }
 
-// When the client is ready, run this code (only once).
-client.once(Events.ClientReady, readyClient => {
-	console.log(`Ready! Logged in as ${readyClient.user.tag}`);
+const commandsPath = path.join(__dirname, 'commands');
+for (const filePath of findCommandFiles(commandsPath)) {
+  const command = require(filePath);
+  if (!command.data || typeof command.execute !== 'function') {
+    console.warn(`Skipped invalid command module: ${path.relative(__dirname, filePath)}`);
+    continue;
+  }
+
+  client.commands.set(command.data.name, command);
+}
+
+client.once(Events.ClientReady, (readyClient) => {
+  console.log(`Ready as ${readyClient.user.username}; loaded ${client.commands.size} commands.`);
 });
 
-client.on(Events.InteractionCreate, interaction => {
-  if (!interaction.isChatInputCommand()) return;
-	console.log(interaction);
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) {
+    return;
+  }
+
+  const command = client.commands.get(interaction.commandName);
+  if (!command) {
+    return;
+  }
+
+  try {
+    await command.execute(interaction);
+  }
+ catch (error) {
+    console.error(`Command /${interaction.commandName} failed (${error?.name || 'Error'}).`);
+    const reply = { content: 'This command could not be completed. Please try again later.' };
+
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(reply);
+      }
+ else {
+        await interaction.reply({ ...reply, flags: MessageFlags.Ephemeral });
+      }
+    }
+ catch {
+      console.error(`Could not reply to /${interaction.commandName}.`);
+    }
+  }
 });
 
-client.login(process.env.TOKEN);
+client.login(process.env.TOKEN).catch((error) => {
+  console.error(`Discord login failed (${error?.name || 'Error'}).`);
+  process.exitCode = 1;
+});
